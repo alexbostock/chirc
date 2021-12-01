@@ -44,18 +44,96 @@
 #include <unistd.h>
 #include <string.h>
 
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <errno.h>
+#include <stdbool.h>
+
 #include "log.h"
+#include "client.h"
+#include "reply.h"
 
+void process_message(char *message, int message_length, client *c) {
+    // Very primitive message parsing for now
+    if (message[0] == 'N') {
+        chilog(DEBUG, "Parsing NICK message");
+        // "NICK <nick>" (not null-terminated)
+        int str_len = message_length - 4;   // Include null-terminator
+        c->nick = malloc(str_len);
+        memcpy(c->nick, &message[5], str_len - 1);
+        c->nick[str_len - 1] = '\0';
+        chilog(INFO, "Parsed nick:");
+        chilog(INFO, c->nick);
+    } else if (message[0] == 'U') {
+        chilog(DEBUG, "Parsing USER message");
+        // USER <username> * * <fullName>
+        int spaces_seen = 0;
+        int offset;
+        for (offset = 5; offset < message_length; offset++) {
+            if (message[offset] == ' ') {
+                spaces_seen++;
+                if(spaces_seen == 1) {
+                    int username_length = offset - 5 + 1;   // Include null-terminator
+                    c->username = malloc(username_length);
+                    memcpy(c->username, &message[5], username_length - 1);
+                    c->username[username_length - 1] = '\0';
+                } else if(spaces_seen == 4) {
+                    offset++;
+                    break;
+                }
+            }
+        }
+        int full_name_length = message_length - offset + 1;     // Include null-terminator
+        c->fullName = malloc(full_name_length);
+        memcpy(c->fullName, &message[offset], full_name_length - 1);
+        c->fullName[full_name_length - 1] = '\0';
+        chilog(INFO, "Parsed username:");
+        chilog(INFO, c->username);
+        chilog(INFO, "Parsed fullName:");
+        chilog(INFO, c->fullName);
+    }
+    if (c->nick != NULL && c->username != NULL) {
+        // <s_host> <RPL_WELCOME> <nick> :Welcome to the Internet Relay Network <username>!<fullName>@<c_host>
+        write(c->sockfd, ":irc.alexbostock.co.uk ", 23);
+        write(c->sockfd, RPL_WELCOME, strlen(RPL_WELCOME));
+        write(c->sockfd, " ", 1);
+        write(c->sockfd, c->nick, strlen(c->nick));
+        write(c->sockfd, " :Welcome to the Internet Relay Network ", 40);
+        write(c->sockfd, c->nick, strlen(c->nick));
+        write(c->sockfd, "!", 1);
+        write(c->sockfd, c->username, strlen(c->username));
+        write(c->sockfd, "@", 1);
+        write(c->sockfd, "foo.example.com\r\n", 17); // TODO: get client's hostname
+    }
+    if (c->nick != NULL)
+        printf(c->nick);
+    if (c->username != NULL)
+        printf(c->username);
+}
 
-int main(int argc, char *argv[])
-{
+int process_buffered_messages(char *buffer, int buffer_size, int buffer_offset, client *c) {
+    int message_start_offset = 0;
+    for (int i = 1; i < buffer_offset - 1; i++) {
+        if (buffer[i] == '\r' && buffer[i+1] == '\n') {
+            int message_length = i - message_start_offset;
+            process_message(buffer+message_start_offset, message_length, c);
+            message_start_offset = i+2;
+        }
+    }
+    if (message_start_offset == 0 && buffer_offset == buffer_size) {
+        chilog(WARNING, "Buffer full of an oversized / invalid message. Dropping buffered data");
+        return buffer_size;
+    }
+    return message_start_offset;
+}
+
+int main(int argc, char *argv[]) {
     int opt;
     char *port = "6667", *passwd = NULL, *servername = NULL, *network_file = NULL;
     int verbosity = 0;
 
     while ((opt = getopt(argc, argv, "p:o:s:n:vqh")) != -1)
-        switch (opt)
-        {
+        switch (opt) {
         case 'p':
             port = strdup(optarg);
             break;
@@ -66,8 +144,7 @@ int main(int argc, char *argv[])
             servername = strdup(optarg);
             break;
         case 'n':
-            if (access(optarg, R_OK) == -1)
-            {
+            if (access(optarg, R_OK) == -1) {
                 printf("ERROR: No such file: %s\n", optarg);
                 exit(-1);
             }
@@ -88,21 +165,18 @@ int main(int argc, char *argv[])
             exit(-1);
         }
 
-    if (!passwd)
-    {
+    if (!passwd) {
         fprintf(stderr, "ERROR: You must specify an operator password\n");
         exit(-1);
     }
 
-    if (network_file && !servername)
-    {
+    if (network_file && !servername) {
         fprintf(stderr, "ERROR: If specifying a network file, you must also specify a server name.\n");
         exit(-1);
     }
 
     /* Set logging level based on verbosity */
-    switch(verbosity)
-    {
+    switch(verbosity) {
     case -1:
         chirc_setloglevel(QUIET);
         break;
@@ -120,8 +194,58 @@ int main(int argc, char *argv[])
         break;
     }
 
-    /* Your code goes here */
+    uint16_t port_number = atoi(port);
+    if (port_number == 0 || port_number > 49151) {
+        chilog(CRITICAL, "Invalid port number");
+        chilog(CRITICAL, port);
+        exit(1);
+    }
+
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd == -1) {
+        chilog(CRITICAL, "Failed to open socket");
+        exit(1);
+    }
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port_number);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(sockfd, (struct sockaddr *) &addr, sizeof(addr)) == -1) {
+        chilog(CRITICAL, "Failed to bind socket");
+        exit(1);
+    }
+    listen(sockfd, 5);
+    chilog(INFO, "Listening on port:");
+    chilog(INFO, port);
+
+    client *c = malloc(sizeof(client));
+    c->nick = NULL;
+    c->username = NULL;
+    c->fullName = NULL;
+
+    struct sockaddr client_addr;    // TODO: look at moving this to the heap
+    socklen_t client_addr_len;
+    c->sockfd = accept(sockfd, &client_addr, &client_addr_len);
+    if (c->sockfd == -1) {
+        chilog(ERROR, "Failed to accept incoming connection");
+        exit(1);
+    }
+
+    const int buffer_size = 1024;
+    char *buffer = malloc(buffer_size);
+    int buffer_offset = 0;
+    while (true) {
+        int bytes_read = read(c->sockfd, buffer + buffer_offset, buffer_size - buffer_offset);
+        if(bytes_read == -1) {
+            chilog(ERROR, "Failed to read from client connection");
+            exit(1);
+        }
+        buffer_offset += bytes_read;
+        int consumed_offset = process_buffered_messages(buffer, buffer_size, buffer_offset, c);
+        // Assuming that memcpy copies bytes sequential in order (otherwise this might not work)
+        memcpy(buffer, buffer + consumed_offset, consumed_offset);
+        buffer_offset -= consumed_offset;
+    }
 
     return 0;
 }
-
