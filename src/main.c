@@ -49,6 +49,8 @@
 #include <errno.h>
 #include <stdbool.h>
 
+#include <pthread.h>
+
 #include "log.h"
 #include "client.h"
 #include "reply.h"
@@ -125,6 +127,25 @@ int process_buffered_messages(char *buffer, int buffer_size, int buffer_offset, 
         return buffer_size;
     }
     return message_start_offset;
+}
+
+void *process_client_messages(void *ptr) {
+    client *c = (client *) ptr;
+    const int buffer_size = 1024;
+    char *buffer = malloc(buffer_size);
+    int buffer_offset = 0;
+    while (true) {
+        int bytes_read = read(c->sockfd, buffer + buffer_offset, buffer_size - buffer_offset);
+        if(bytes_read == -1) {
+            chilog(ERROR, "Failed to read from client connection");
+            exit(1);
+        }
+        buffer_offset += bytes_read;
+        int consumed_offset = process_buffered_messages(buffer, buffer_size, buffer_offset, c);
+        // Assuming that memcpy copies bytes sequential in order (otherwise this might not work)
+        memcpy(buffer, buffer + consumed_offset, consumed_offset);
+        buffer_offset -= consumed_offset;
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -218,34 +239,23 @@ int main(int argc, char *argv[]) {
     chilog(INFO, "Listening on port:");
     chilog(INFO, port);
 
-    client *c = malloc(sizeof(client));
-    c->nick = NULL;
-    c->username = NULL;
-    c->fullName = NULL;
+    while (1) {
+        // Receive incoming connections
 
-    struct sockaddr client_addr;    // TODO: look at moving this to the heap
-    socklen_t client_addr_len;
-    c->sockfd = accept(sockfd, &client_addr, &client_addr_len);
-    if (c->sockfd == -1) {
-        chilog(ERROR, "Failed to accept incoming connection");
-        exit(1);
-    }
+        client *c = malloc(sizeof(client));
+        c->nick = NULL;
+        c->username = NULL;
+        c->fullName = NULL;
 
-    const int buffer_size = 1024;
-    char *buffer = malloc(buffer_size);
-    int buffer_offset = 0;
-    while (true) {
-        int bytes_read = read(c->sockfd, buffer + buffer_offset, buffer_size - buffer_offset);
-        if(bytes_read == -1) {
-            chilog(ERROR, "Failed to read from client connection");
+        struct sockaddr client_addr;    // TODO: look at moving this to the heap
+        socklen_t client_addr_len;
+        c->sockfd = accept(sockfd, &client_addr, &client_addr_len);
+        if (c->sockfd == -1) {
+            chilog(ERROR, "Failed to accept incoming connection");
             exit(1);
         }
-        buffer_offset += bytes_read;
-        int consumed_offset = process_buffered_messages(buffer, buffer_size, buffer_offset, c);
-        // Assuming that memcpy copies bytes sequential in order (otherwise this might not work)
-        memcpy(buffer, buffer + consumed_offset, consumed_offset);
-        buffer_offset -= consumed_offset;
-    }
 
-    return 0;
+        pthread_t client_thread;
+        int iret = pthread_create(&client_thread, NULL, &process_client_messages, c);
+    }
 }
