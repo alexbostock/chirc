@@ -54,46 +54,25 @@
 #include "log.h"
 #include "client.h"
 #include "reply.h"
+#include "message.c"
 
 void process_message(char *message, int message_length, client *c) {
-    // Very primitive message parsing for now
-    if (message[0] == 'N') {
-        chilog(DEBUG, "Parsing NICK message");
-        // "NICK <nick>" (not null-terminated)
-        int str_len = message_length - 4;   // Include null-terminator
-        c->nick = malloc(str_len);
-        memcpy(c->nick, &message[5], str_len - 1);
-        c->nick[str_len - 1] = '\0';
-        chilog(INFO, "Parsed nick:");
-        chilog(INFO, c->nick);
-    } else if (message[0] == 'U') {
-        chilog(DEBUG, "Parsing USER message");
-        // USER <username> * * <fullName>
-        int spaces_seen = 0;
-        int offset;
-        for (offset = 5; offset < message_length; offset++) {
-            if (message[offset] == ' ') {
-                spaces_seen++;
-                if(spaces_seen == 1) {
-                    int username_length = offset - 5 + 1;   // Include null-terminator
-                    c->username = malloc(username_length);
-                    memcpy(c->username, &message[5], username_length - 1);
-                    c->username[username_length - 1] = '\0';
-                } else if(spaces_seen == 4) {
-                    offset++;
-                    break;
-                }
-            }
-        }
-        int full_name_length = message_length - offset + 1;     // Include null-terminator
-        c->fullName = malloc(full_name_length);
-        memcpy(c->fullName, &message[offset], full_name_length - 1);
-        c->fullName[full_name_length - 1] = '\0';
-        chilog(INFO, "Parsed username:");
-        chilog(INFO, c->username);
-        chilog(INFO, "Parsed fullName:");
-        chilog(INFO, c->fullName);
+    msg *m = parse_message(message, message_length);
+    if(strcmp(m->command, "NICK") == 0) {
+        chilog(INFO, "Processing NICK");
+        c->nick = get_arg(m, 0);
+        chilog(INFO, "Parsed nick: %s", c->nick);
+    } else if(strcmp(m->command, "USER") == 0) {
+        chilog(INFO, "Processing USER");
+        c->username = get_arg(m, 0);
+        c->fullName = get_arg(m, 3);
+        chilog(INFO, "Parsed username: %s", c->username);
+        chilog(INFO, "Parsed fullName: %s", c->fullName);
+    } else {
+        chilog(ERROR, "Unexpected command %s", m->command);
     }
+    free_message(m);
+
     if (c->nick != NULL && c->username != NULL) {
         // <s_host> <RPL_WELCOME> <nick> :Welcome to the Internet Relay Network <username>!<fullName>@<c_host>
         write(c->sockfd, ":irc.alexbostock.co.uk ", 23);
@@ -107,10 +86,6 @@ void process_message(char *message, int message_length, client *c) {
         write(c->sockfd, "@", 1);
         write(c->sockfd, "foo.example.com\r\n", 17); // TODO: get client's hostname
     }
-    if (c->nick != NULL)
-        printf(c->nick);
-    if (c->username != NULL)
-        printf(c->username);
 }
 
 int process_buffered_messages(char *buffer, int buffer_size, int buffer_offset, client *c) {
@@ -132,7 +107,7 @@ int process_buffered_messages(char *buffer, int buffer_size, int buffer_offset, 
 void *process_client_messages(void *ptr) {
     client *c = (client *) ptr;
     const int buffer_size = 1024;
-    char *buffer = malloc(buffer_size);
+    char *buffer = malloc(buffer_size * sizeof(char));
     int buffer_offset = 0;
     while (true) {
         int bytes_read = read(c->sockfd, buffer + buffer_offset, buffer_size - buffer_offset);
