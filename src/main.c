@@ -56,13 +56,32 @@
 #include "reply.h"
 #include "message.c"
 
+void send_data(client *c, char *data) {
+    write(c->sockfd, data, strlen(data));
+}
+
+void send_welcome_message(client *c) {
+    // <s_host> <RPL_WELCOME> <nick> :Welcome to the Internet Relay Network <username>!<fullName>@<c_host>
+    send_data(c, ":irc.alexbostock.co.uk ");
+    send_data(c, RPL_WELCOME);
+    send_data(c, " ");
+    send_data(c, c->nick);
+    send_data(c, " :Welcome to the Internet Relay Network ");
+    send_data(c, c->nick);
+    send_data(c, "!");
+    send_data(c, c->username);
+    send_data(c, "@");
+    send_data(c, "foo.example.com\r\n"); // TODO: get client's hostname
+    c->welcomeMessageSent = true;
+}
+
 void process_message(char *message, int message_length, client *c) {
     msg *m = parse_message(message, message_length);
-    if(strcmp(m->command, "NICK") == 0) {
+    if (strcmp(m->command, "NICK") == 0) {
         chilog(INFO, "Processing NICK");
         c->nick = get_arg(m, 0);
         chilog(INFO, "Parsed nick: %s", c->nick);
-    } else if(strcmp(m->command, "USER") == 0) {
+    } else if (strcmp(m->command, "USER") == 0) {
         chilog(INFO, "Processing USER");
         c->username = get_arg(m, 0);
         c->fullName = get_arg(m, 3);
@@ -73,18 +92,8 @@ void process_message(char *message, int message_length, client *c) {
     }
     free_message(m);
 
-    if (c->nick != NULL && c->username != NULL) {
-        // <s_host> <RPL_WELCOME> <nick> :Welcome to the Internet Relay Network <username>!<fullName>@<c_host>
-        write(c->sockfd, ":irc.alexbostock.co.uk ", 23);
-        write(c->sockfd, RPL_WELCOME, strlen(RPL_WELCOME));
-        write(c->sockfd, " ", 1);
-        write(c->sockfd, c->nick, strlen(c->nick));
-        write(c->sockfd, " :Welcome to the Internet Relay Network ", 40);
-        write(c->sockfd, c->nick, strlen(c->nick));
-        write(c->sockfd, "!", 1);
-        write(c->sockfd, c->username, strlen(c->username));
-        write(c->sockfd, "@", 1);
-        write(c->sockfd, "foo.example.com\r\n", 17); // TODO: get client's hostname
+    if (c->nick != NULL && c->username != NULL && !c->welcomeMessageSent) {
+        send_welcome_message(c);
     }
 }
 
@@ -111,7 +120,7 @@ void *process_client_messages(void *ptr) {
     int buffer_offset = 0;
     while (true) {
         int bytes_read = read(c->sockfd, buffer + buffer_offset, buffer_size - buffer_offset);
-        if(bytes_read == -1) {
+        if (bytes_read == -1) {
             chilog(ERROR, "Failed to read from client connection");
             exit(1);
         }
@@ -221,6 +230,7 @@ int main(int argc, char *argv[]) {
         c->nick = NULL;
         c->username = NULL;
         c->fullName = NULL;
+        c->welcomeMessageSent = false;
 
         struct sockaddr client_addr;    // TODO: look at moving this to the heap
         socklen_t client_addr_len;

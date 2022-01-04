@@ -30,7 +30,7 @@ msg *parse_message(char *message_str, int message_length) {
                 break;
             }
         }
-        if(offset == message_length) {
+        if (offset == message_length) {
             offset++;
         }
         int arg_len = offset - start_offset;    // Including null-terminator
@@ -39,7 +39,7 @@ msg *parse_message(char *message_str, int message_length) {
         memcpy(arg, &message_str[start_offset], arg_len - 1);
         arg[arg_len - 1] = '\0';
         chilog(DEBUG, "Arg: %s", arg);
-        if(arg_number == -1) {
+        if (arg_number == -1) {
             m->command = arg;
         } else {
             m->args[arg_number] = arg;
